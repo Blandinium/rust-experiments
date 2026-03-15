@@ -8,7 +8,7 @@ use crate::list::{List, ListCell};
 ///
 /// ```
 /// use proplists::List;
-/// let list = List::cons(1, &List::new(2));
+/// let list = List::new(2).prepend(1);
 /// let mut iter = list.iter();
 /// assert_eq!(iter.next(), Some(&1));
 /// ```
@@ -40,7 +40,7 @@ impl<'a, T> IntoIterator for &'a List<T> {
     ///
     /// ```
     /// use proplists::List;
-    /// let list = List::cons(1, &List::new(2));
+    /// let list = List::new(2).prepend(1);
     /// for element in &list {
     ///     println!("{}", element);
     /// }

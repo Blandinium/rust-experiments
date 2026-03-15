@@ -90,6 +90,21 @@ impl<T> List<T> {
     pub fn cons(data: T, list: &Self) -> Self {
         Self(Arc::new(ListCell::Cons(data, Arc::clone(&list.0))))
     }
+    /// Returns a new list with `data` prepended to the current list.
+    ///
+    /// This is an alias for `List::cons(data, self)`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use proplists::List;
+    /// let list = List::new(2).prepend(1);
+    /// assert_eq!(list.hd(), Some(&1));
+    /// assert_eq!(list.tl().unwrap().hd(), Some(&2));
+    /// ```
+    pub fn prepend(&self, data: T) -> Self {
+        Self::cons(data, self)
+    }
     /// Returns a reference to the first element of the list (the head), or `None` if it is empty.
     ///
     /// # Examples
@@ -114,7 +129,7 @@ impl<T> List<T> {
     ///
     /// ```
     /// use proplists::List;
-    /// let list = List::cons(1, &List::new(2));
+    /// let list = List::new(2).prepend(1);
     /// let tail = list.tl().unwrap();
     /// assert_eq!(tail.hd(), Some(&2));
     /// ```
@@ -149,7 +164,7 @@ impl<T> List<T> {
     ///
     /// ```
     /// use proplists::List;
-    /// let list = List::cons(1, &List::new(2));
+    /// let list = List::new(2).prepend(1);
     /// let mut iter = list.iter();
     /// assert_eq!(iter.next(), Some(&1));
     /// assert_eq!(iter.next(), Some(&2));
@@ -167,7 +182,7 @@ impl<T: Clone> List<T> {
     ///
     /// ```
     /// use proplists::List;
-    /// let list = List::cons(1, &List::new(2));
+    /// let list = List::new(2).prepend(1);
     /// let reversed = list.reverse();
     /// assert_eq!(reversed.hd(), Some(&2));
     /// assert_eq!(reversed.tl().unwrap().hd(), Some(&1));

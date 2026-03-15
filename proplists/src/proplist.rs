@@ -13,7 +13,7 @@ impl<K: PartialEq, V> List<(K, V)> {
     /// #[derive(PartialEq)]
     /// enum Key { A, B }
     ///
-    /// let list = List::cons((Key::A, 1), &List::new((Key::B, 2)));
+    /// let list = List::new((Key::B, 2)).prepend((Key::A, 1));
     /// assert_eq!(list.get_value(&Key::A), Some(&1));
     /// assert_eq!(list.get_value(&Key::B), Some(&2));
     /// ```
@@ -31,7 +31,10 @@ impl<K: PartialEq, V> List<(K, V)> {
     /// #[derive(PartialEq)]
     /// enum Key { A, B }
     ///
-    /// let list = List::cons((Key::A, 1), &List::cons((Key::B, 2), &List::cons((Key::A, 3), &List::empty())));
+    /// let list = List::empty()
+    ///     .prepend((Key::A, 3))
+    ///     .prepend((Key::B, 2))
+    ///     .prepend((Key::A, 1));
     /// let values = list.get_values(&Key::A);
     ///
     /// assert_eq!(values.iter().cloned().collect::<Vec<_>>(), vec![&1, &3]);
@@ -53,7 +56,10 @@ impl<K: PartialEq, V> List<(K, V)> {
     /// #[derive(PartialEq, Clone, Debug)]
     /// enum Key { A, B }
     ///
-    /// let list = List::cons((Key::A, 1), &List::cons((Key::B, 2), &List::cons((Key::A, 3), &List::empty())));
+    /// let list = List::empty()
+    ///     .prepend((Key::A, 3))
+    ///     .prepend((Key::B, 2))
+    ///     .prepend((Key::A, 1));
     /// let deleted = list.delete(&Key::A);
     ///
     /// assert_eq!(deleted.iter().cloned().collect::<Vec<_>>(), vec![(Key::B, 2)]);
