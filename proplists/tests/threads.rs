@@ -1,11 +1,11 @@
 use std::sync::mpsc;
 use std::thread;
-use proplists::List;
+use proplists::{list, List};
 
 #[test]
 fn read_shared_tail_from_multiple_threads() {
     let (tx, rx) = mpsc::channel();
-    let tail: List<i32> = List::new(1).prepend(5).prepend(10);
+    let tail: List<i32> = list![10,5,1];
 
     let mut handles = Vec::new();
     for n in 0..10 {
