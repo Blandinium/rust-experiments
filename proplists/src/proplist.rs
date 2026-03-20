@@ -1,4 +1,6 @@
 use crate::list::List;
+use std::collections::HashMap;
+use std::hash::Hash;
 
 impl<K: PartialEq, V> List<(K, V)> {
     /// Returns a reference to the value associated with `key` in the list of pairs, or `None` if not found.
@@ -73,6 +75,53 @@ impl<K: PartialEq, V> List<(K, V)> {
             .filter(|(k, _)| k != key)
             .cloned()
             .collect()
+    }
+
+    /// Converts the list of pairs into a `HashMap`.
+    ///
+    /// If there are multiple entries for the same key, only the last one in the list will be kept in the map.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use proplists::{List, list};
+    /// use std::collections::HashMap;
+    ///
+    /// let list = list![("a", 1),("b", 2),("a", 3)];
+    /// let map = list.to_map();
+    ///
+    /// assert_eq!(map.get("a"), Some(&3));
+    /// assert_eq!(map.get("b"), Some(&2));
+    /// ```
+    pub fn to_map(&self) -> HashMap<K, V>
+    where
+        K: Eq + Hash + Clone,
+        V: Clone,
+    {
+        self.iter().cloned().collect()
+    }
+
+    /// Creates a list of pairs from a `HashMap`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use proplists::List;
+    /// use std::collections::HashMap;
+    ///
+    /// let mut map = HashMap::new();
+    /// map.insert("a", 1);
+    /// map.insert("b", 2);
+    ///
+    /// let list = List::from_map(map);
+    /// assert_eq!(list.get_value(&"a"), Some(&1));
+    /// assert_eq!(list.get_value(&"b"), Some(&2));
+    /// ```
+    pub fn from_map(map: HashMap<K, V>) -> Self
+    where
+        K: Eq + Hash,
+    {
+        map.into_iter().collect()
     }
 
 }
