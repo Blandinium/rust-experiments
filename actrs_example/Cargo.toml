@@ -1,0 +1,7 @@
+[package]
+name = "actrs_example"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+actrs_macros = { path = "../actrs_macros"}
