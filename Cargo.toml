@@ -1,4 +1,4 @@
 [workspace]
 resolver = "3"
-members = ["actrs_example","actrs_macros","proplists"]
+members = ["actrs","actrs_example","actrs_macros","proplists"]
 

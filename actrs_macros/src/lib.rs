@@ -26,11 +26,25 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
     let enum_name = format_ident!("{}Message", actor_ident);
 
     let mut consumers = Vec::new();
+    let mut init_method = None;
 
     for impl_item in &mut impl_block.items {
         let ImplItem::Fn(method) = impl_item else {
             continue;
         };
+
+        if let Some(idx) = method.attrs.iter().position(|a| a.path().is_ident("initialize")) {
+            method.attrs.remove(idx);
+            if init_method.is_some() {
+                return syn::Error::new(
+                    method.span(),
+                    "only one #[initialize] method is allowed",
+                )
+                    .to_compile_error()
+                    .into();
+            }
+            init_method = Some(method.sig.ident.clone());
+        }
 
         let Some(variant_ident) = take_message_consumer_attr(method) else {
             continue;
@@ -68,11 +82,11 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
         let method = &c.method_name;
         if c.msg_type.is_some() {
             quote! {
-                #enum_name::#variant(inner) => self.#method(inner, from, state)
+                #enum_name::#variant(inner) => self.#method(inner, ctx, state)
             }
         } else {
             quote! {
-                #enum_name::#variant => self.#method(from, state)
+                #enum_name::#variant => self.#method(ctx, state)
             }
         }
     });
@@ -89,6 +103,11 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
         })
     });
 
+    let init_impl = match init_method {
+        Some(method) => quote! { self.#method() },
+        None => quote! { Default::default() },
+    };
+
     let expanded = quote! {
         #impl_block
 
@@ -96,16 +115,20 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
             #(#variants),*
         }
 
-        impl #impl_generics #self_ty #where_clause {
-            pub fn consume_message(
+        impl #impl_generics ::actrs::Actor<#state_type, #enum_name #ty_generics> for #self_ty #where_clause {
+            fn consume_message(
                 &self,
-                msg: #enum_name #ty_generics,
-                from: Pid,
+                msg: Box<#enum_name #ty_generics>,
+                ctx: ::actrs::MsgCtx,
                 state: #state_type,
             ) -> #state_type {
-                match msg {
+                match *msg {
                     #(#match_arms),*
                 }
+            }
+
+            fn init(&self) -> #state_type {
+                #init_impl
             }
         }
 
@@ -113,6 +136,11 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     expanded.into()
+}
+
+#[proc_macro_attribute]
+pub fn initialize(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
 }
 
 fn parse_actor_args(attr: TokenStream) -> syn::Result<Type> {
@@ -192,17 +220,17 @@ fn parse_consumer_method(method: &ImplItemFn, variant: Ident) -> syn::Result<Con
         })
         .collect();
 
-    let (msg_type, from_type, state_type) = match non_receiver.as_slice() {
-        [msg, from, state] => (
+    let (msg_type, ctx_type, state_type) = match non_receiver.as_slice() {
+        [msg, ctx, state] => (
             Some((*msg.ty).clone()),
-            (*from.ty).clone(),
+            (*ctx.ty).clone(),
             (*state.ty).clone(),
         ),
-        [from, state] => (None, (*from.ty).clone(), (*state.ty).clone()),
+        [ctx, state] => (None, (*ctx.ty).clone(), (*state.ty).clone()),
         _ => {
             return Err(syn::Error::new(
                 method.sig.span(),
-                "message consumer must have one of these signatures:\n  fn handler(&self, msg: Msg, from: Pid, state: T) -> T\n  fn handler(&self, from: Pid, state: T) -> T",
+                "message consumer must have one of these signatures:\n  fn handler(&self, msg: Msg, ctx: ::actrs::MsgCtx, state: T) -> T\n  fn handler(&self, ctx: ::actrs::MsgCtx, state: T) -> T",
             ))
         }
     };
@@ -224,10 +252,10 @@ fn parse_consumer_method(method: &ImplItemFn, variant: Ident) -> syn::Result<Con
         ));
     }
 
-    if !same_type(&from_type, &syn::parse_quote!(Pid)) {
+    if !is_msg_ctx_type(&ctx_type) {
         return Err(syn::Error::new(
-            from_type.span(),
-            "second-to-last parameter must have type Pid",
+            ctx_type.span(),
+            "second-to-last parameter must have type MsgCtx",
         ));
     }
 
@@ -286,4 +314,19 @@ fn ensure_return_type_present(method: &ImplItemFn) -> syn::Result<()> {
 
 fn same_type(a: &Type, b: &Type) -> bool {
     quote!(#a).to_string() == quote!(#b).to_string()
+}
+
+fn is_msg_ctx_type(ty: &Type) -> bool {
+    let Type::Path(tp) = ty else {
+        return false;
+    };
+
+    // Accept both "MsgCtx" and "::actrs::MsgCtx" and "actrs::MsgCtx"
+    if let Some(last_seg) = tp.path.segments.last() {
+        if last_seg.ident == "MsgCtx" {
+            return true;
+        }
+    }
+
+    false
 }

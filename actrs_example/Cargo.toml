@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 actrs_macros = { path = "../actrs_macros"}
+actrs = { path = "../actrs"}

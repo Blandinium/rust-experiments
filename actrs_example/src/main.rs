@@ -1,8 +1,6 @@
 
 use actrs_macros::actor;
-
-#[derive(Debug, Clone, Copy)]
-pub struct Pid(pub u64);
+use actrs::{Actor, ActorRef, MsgCtx};
 
 pub mod ping {
     #[derive(Debug)]
@@ -14,34 +12,38 @@ pub struct MyActor {
 
 #[actor(state = usize)]
 impl MyActor {
+    #[initialize]
+    fn init(&self) -> usize {
+        42
+    }
+
     #[message_consumer(Ping)]
-    fn handle_ping(&self, msg: ping::Ping, from: Pid, state: usize) -> usize {
-        println!("Ping from {:?}: {:?}", from.0, msg.0);
+    fn handle_ping(&self, msg: ping::Ping, ctx: MsgCtx, state: usize) -> usize {
+        println!("Ping from {:?}: {:?}", ctx.from, msg.0);
         state+1
     }
 
     #[message_consumer(Stop)]
-    fn handle_stop(&self, from: Pid, state: usize) -> usize {
-        println!("Stop from {:?}", from.0);
+    fn handle_stop(&self, ctx: MsgCtx, state: usize) -> usize {
+        println!("Stop from {:?}", ctx.from);
         state
     }
 }
 
 fn main() {
     let actor = MyActor{};
-    let pid = Pid(42);
+    let ctx = MsgCtx { from: ActorRef(1), to: ActorRef(2) };
 
-    let state = 10usize;
+    let state = actor.init();
+    println!("initial state = {}", state);
 
-    let state = actor.consume_message(
-        MyActorMessage::Ping(ping::Ping("hello".into())),
-        pid,
+    let state = actor.consume_any_message(
+        Box::from(MyActorMessage::Ping(ping::Ping("hello".into()))),
+        ctx,
         state,
     );
 
-    let state = actor.consume_message(MyActorMessage::Stop, pid, state);
-
-    let state = actor.consume_message(ping::Ping("via From".into()).into(), pid, state);
+    let state = actor.consume_any_message(Box::from(MyActorMessage::Stop), ctx, state);
 
     println!("final state = {}", state);
 }
