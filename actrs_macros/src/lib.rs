@@ -27,6 +27,7 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let mut consumers = Vec::new();
     let mut init_method = None;
+    let mut init_param_type = None;
 
     for impl_item in &mut impl_block.items {
         let ImplItem::Fn(method) = impl_item else {
@@ -44,6 +45,18 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
                 .into();
             }
             init_method = Some(method.sig.ident.clone());
+            
+            // Extract parameter type for initialize
+            let mut params = method.sig.inputs.iter().filter_map(|arg| match arg {
+                FnArg::Typed(p) => Some(p),
+                FnArg::Receiver(_) => None,
+            });
+            
+            if let Some(param) = params.next() {
+                init_param_type = Some((*param.ty).clone());
+            } else {
+                init_param_type = Some(syn::parse_quote! { () });
+            }
         }
 
         let Some(variant_ident) = take_message_consumer_attr(method) else {
@@ -105,9 +118,15 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
         })
     });
 
-    let init_impl = match init_method {
-        Some(method) => quote! { self.#method() },
-        None => quote! { Default::default() },
+    let (init_impl, init_param_type) = match (init_method, init_param_type) {
+        (Some(method), Some(param_ty)) => {
+            if same_type(&param_ty, &syn::parse_quote! { () }) {
+                (quote! { self.#method() }, param_ty)
+            } else {
+                (quote! { self.#method(param) }, param_ty)
+            }
+        },
+        _ => (quote! { Default::default() }, syn::parse_quote! { () }),
     };
 
     let expanded = quote! {
@@ -118,21 +137,22 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         impl #impl_generics ::actrs::Actor for #self_ty #where_clause {
-            type T = #state_type;
+            type S = #state_type;
             type M = #enum_name #ty_generics;
+            type I = #init_param_type;
 
             fn consume_message(
                 &self,
                 msg: Box<Self::M>,
                 ctx: ::actrs::MsgCtx,
-                state: Self::T,
-            ) -> Self::T {
+                state: Self::S,
+            ) -> Self::S {
                 match *msg {
                     #(#match_arms),*
                 }
             }
 
-            fn init(&self) -> Self::T {
+            fn handle_init(&self, param: Self::I) -> Self::S {
                 #init_impl
             }
         }
@@ -144,16 +164,18 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         impl #impl_generics #self_ty #where_clause {
-            pub fn send<M>(
+            pub fn send<M, TargetActorMessage>(
                 &self,
                 to: ::actrs::ActorRef,
                 msg: M,
             ) -> ::core::result::Result<(), &'static str>
             where
                 M: ::core::any::Any + Send + 'static,
+                TargetActorMessage: ::actrs::Actor + ::core::any::Any + Send + 'static,
+                <TargetActorMessage as ::actrs::Actor>::M: ::core::convert::From<M>,
             {
                 match &self.#handle_field {
-                    Some(handle) => handle.send(to, Box::new(msg)),
+                    Some(handle) => handle.send(to, Box::new(<<TargetActorMessage as ::actrs::Actor>::M>::from(msg))),
                     None => Err("actor handle not initialized"),
                 }
             }
@@ -273,13 +295,14 @@ fn parse_consumer_method(method: &ImplItemFn, variant: Ident) -> syn::Result<Con
         })
         .collect();
 
-    let (msg_type, ctx_type, state_type) = match non_receiver.as_slice() {
+    let (msg_type, ctx_type, state_pat, state_type) = match non_receiver.as_slice() {
         [msg, ctx, state] => (
             Some((*msg.ty).clone()),
             (*ctx.ty).clone(),
+            &state.pat,
             (*state.ty).clone(),
         ),
-        [ctx, state] => (None, (*ctx.ty).clone(), (*state.ty).clone()),
+        [ctx, state] => (None, (*ctx.ty).clone(), &state.pat, (*state.ty).clone()),
         _ => {
             return Err(syn::Error::new(
                 method.sig.span(),
@@ -287,6 +310,20 @@ fn parse_consumer_method(method: &ImplItemFn, variant: Ident) -> syn::Result<Con
             ))
         }
     };
+
+    if let syn::Pat::Ident(syn::PatIdent { mutability: Some(m), .. }) = &**state_pat {
+        return Err(syn::Error::new(
+            m.span(),
+            "the state parameter must not be mutable (The state should never be mutable)",
+        ));
+    }
+
+    if let syn::Type::Reference(r) = &state_type {
+        return Err(syn::Error::new(
+            r.span(),
+            "the state parameter must be passed by value, not by reference",
+        ));
+    }
 
     let ret_ty = match &method.sig.output {
         ReturnType::Type(_, ty) => ty.as_ref(),

@@ -23,35 +23,47 @@ pub struct MsgCtx {
 /// A trait that can handle any message by downcasting.
 pub trait AnyActor: Send + Sync {
     fn consume_any_message(&self, msg: Box<dyn Any + Send>, ctx: MsgCtx, state: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync>;
-    fn init_any(&self) -> Box<dyn Any + Send + Sync>;
+    fn init_any(&self, param: Box<dyn Any + Send>) -> Box<dyn Any + Send + Sync>;
 }
 
+/// The core Actor trait.
+/// - `S`: The Actor's internal state type.
+/// - `M`: The message type that this actor handles.
+/// - `I`: The initialization parameter type.
 pub trait Actor: AnyActor
 where
     Self::M: Any + Send,
-    Self::T: Any + Send + Sync,
+    Self::S: Any + Send + Sync,
+    Self::I: Any + Send,
 {
-    type T;
+    /// The Actor's internal state type.
+    type S;
+    /// The message type that this actor handles.
     type M;
-    fn consume_message(&self, msg: Box<Self::M>, ctx: MsgCtx, state: Self::T) -> Self::T;
-    fn init(&self) -> Self::T;
+    /// The initialization parameter type.
+    type I;
+
+    fn consume_message(&self, msg: Box<Self::M>, ctx: MsgCtx, state: Self::S) -> Self::S;
+    fn handle_init(&self, param: Self::I) -> Self::S;
 }
 
 impl<A> AnyActor for A
 where
     A: Actor + Send + Sync,
     A::M: Any + Send,
-    A::T: Any + Send + Sync,
+    A::S: Any + Send + Sync,
+    A::I: Any + Send,
 {
     fn consume_any_message(&self, msg: Box<dyn Any + Send>, ctx: MsgCtx, state: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
         let msg = msg.downcast::<A::M>().expect("invalid message type for actor");
-        let state = state.downcast::<A::T>().expect("invalid state type for actor");
+        let state = state.downcast::<A::S>().expect("invalid state type for actor");
         let new_state = self.consume_message(msg, ctx, *state);
         Box::new(new_state)
     }
 
-    fn init_any(&self) -> Box<dyn Any + Send + Sync> {
-        Box::new(self.init())
+    fn init_any(&self, param: Box<dyn Any + Send>) -> Box<dyn Any + Send + Sync> {
+        let param = param.downcast::<A::I>().expect("invalid initialization parameter for actor");
+        Box::new(self.handle_init(*param))
     }
 }
 
@@ -116,7 +128,7 @@ impl Stage {
                 .states
                 .remove(&actor_ref)
                 .map(|(_, s)| s)
-                .unwrap_or_else(|| actor.init_any());
+                .expect("actor state not found");
 
             let deadline = Instant::now() + self.max_batch_time;
             let mut processed = 0usize;
@@ -175,7 +187,7 @@ impl Stage {
         }
     }
 
-    pub fn add_actor<A>(self: &Arc<Self>, mut actor: A) -> ActorRef
+    pub fn add_actor<A>(self: &Arc<Self>, mut actor: A, init_param: A::I) -> ActorRef
 where
     A: Actor + StageAware + 'static + Send + Sync,
 {
@@ -183,6 +195,9 @@ where
         let actor_ref = ActorRef(id);
         let handle = ActorHandle::new(self, actor_ref);
         actor.set_handle(handle);
+        
+        let initial_state = actor.handle_init(init_param);
+        self.states.insert(actor_ref, Box::new(initial_state));
         self.actors.insert(actor_ref, Arc::new(actor));
 
         let (tx, rx) = mpsc::channel();
@@ -238,15 +253,16 @@ mod tests {
     }
 
     impl Actor for MyActor {
-        type T = i32;
+        type S = i32;
         type M = i32;
+        type I = i32;
 
         fn consume_message(&self, msg: Box<i32>, _ctx: MsgCtx, state: i32) -> i32 {
             state + *msg
         }
 
-        fn init(&self) -> i32 {
-            0
+        fn handle_init(&self, param: i32) -> i32 {
+            param
         }
     }
 
@@ -283,7 +299,7 @@ mod tests {
     #[test]
     fn test_stage_send_accumulates_messages() {
         let stage = Stage::new(2, 10, Duration::from_millis(10));
-        let actor_ref = stage.add_actor(MyActor::new());
+        let actor_ref = stage.add_actor(MyActor::new(), 0);
 
         stage.send(actor_ref, None, Box::new(10));
         stage.send(actor_ref, None, Box::new(20));
@@ -294,7 +310,7 @@ mod tests {
     #[test]
     fn test_stage_batches_more_than_limit() {
         let stage = Stage::new(2, 10, Duration::from_millis(10));
-        let actor_ref = stage.add_actor(MyActor::new());
+        let actor_ref = stage.add_actor(MyActor::new(), 0);
 
         for _ in 0..11 {
             stage.send(actor_ref, None, Box::new(1));
@@ -306,8 +322,8 @@ mod tests {
     #[test]
     fn test_multiple_actors_unique_refs() {
         let stage = Stage::new(1, 10, Duration::from_millis(10));
-        let ref1 = stage.add_actor(MyActor::new());
-        let ref2 = stage.add_actor(MyActor::new());
+        let ref1 = stage.add_actor(MyActor::new(), 0);
+        let ref2 = stage.add_actor(MyActor::new(), 0);
 
         assert_ne!(ref1, ref2);
     }
