@@ -89,6 +89,9 @@ pub struct WorkCompletedAck {
 }
 
 #[derive(Debug, Clone)]
+pub struct Shutdown;
+
+#[derive(Debug, Clone)]
 pub struct RegisterWorker {
     pub worker_id: usize,
     pub worker_ref: ActorRef,
@@ -134,9 +137,9 @@ impl ReaderActor {
     }
 
     #[message_consumer(StartReading)]
-    fn handle_start(&self, _msg: StartReading, _ctx: MsgCtx, state: ReaderState) -> ReaderState {
+    fn handle_start(&self, _msg: StartReading, _ctx: MsgCtx, state: ReaderState) -> ::actrs::ActorResult<ReaderState> {
         if state.started {
-            return state;
+            return ::actrs::ActorResult::Ok(state);
         }
         let state = ReaderState { started: true, ..state };
 
@@ -144,7 +147,7 @@ impl ReaderActor {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("ReaderActor: Failed to open file {}: {}", state.input_path, e);
-                return state;
+                return ::actrs::ActorResult::Ok(state);
             }
         };
 
@@ -163,9 +166,8 @@ impl ReaderActor {
             }
         }
 
-        let state = ReaderState { total_lines, ..state };
-        let _ = self.send::<_, DispatcherActor>(state.dispatcher, ReaderFinished { total_lines: state.total_lines });
-        state
+        let _ = self.send::<_, DispatcherActor>(state.dispatcher, ReaderFinished { total_lines });
+        ::actrs::ActorResult::Stop
     }
 }
 
@@ -242,32 +244,42 @@ impl DispatcherActor {
     }
 
     #[message_consumer(ReaderFinished)]
-    fn handle_reader_finished(&self, msg: ReaderFinished, _ctx: MsgCtx, state: DispatcherState) -> DispatcherState {
+    fn handle_reader_finished(&self, msg: ReaderFinished, _ctx: MsgCtx, state: DispatcherState) -> ::actrs::ActorResult<DispatcherState> {
         let state = DispatcherState {
             reader_done: true,
             expected_total: msg.total_lines,
             ..state
         };
-        self.check_completion(&state);
-        state
+        if state.reader_done && state.total_completed == state.expected_total && state.total_dispatched == state.expected_total {
+            for worker_ref in state.workers.iter() {
+                let _ = self.send::<_, WorkerActor>(*worker_ref, Shutdown);
+            }
+            let _ = self.send::<_, CollectorActor>(state.collector, FinalizeCollection);
+            let _ = self.send::<_, LedgerActor>(state.ledger, FinalizeLedger);
+            ::actrs::ActorResult::Stop
+        } else {
+            ::actrs::ActorResult::Ok(state)
+        }
     }
 
     #[message_consumer(WorkCompletedAck)]
-    fn handle_ack(&self, _msg: WorkCompletedAck, _ctx: MsgCtx, state: DispatcherState) -> DispatcherState {
+    fn handle_ack(&self, _msg: WorkCompletedAck, _ctx: MsgCtx, state: DispatcherState) -> ::actrs::ActorResult<DispatcherState> {
         let state = DispatcherState {
             total_completed: state.total_completed + 1,
             ..state
         };
-        self.check_completion(&state);
-        state
-    }
-
-    fn check_completion(&self, state: &DispatcherState) {
         if state.reader_done && state.total_completed == state.expected_total && state.total_dispatched == state.expected_total {
+            for worker_ref in state.workers.iter() {
+                let _ = self.send::<_, WorkerActor>(*worker_ref, Shutdown);
+            }
             let _ = self.send::<_, CollectorActor>(state.collector, FinalizeCollection);
             let _ = self.send::<_, LedgerActor>(state.ledger, FinalizeLedger);
+            ::actrs::ActorResult::Stop
+        } else {
+            ::actrs::ActorResult::Ok(state)
         }
     }
+
 }
 
 // 3. WorkerActor
@@ -348,11 +360,16 @@ impl WorkerActor {
         }
 
         let _ = self.send::<_, DispatcherActor>(dispatcher, WorkCompletedAck { line_id: msg.line_id, worker_id: state.worker_id });
-        
+
         WorkerState {
             processed_count: state.processed_count + 1,
             ..state
         }
+    }
+
+    #[message_consumer(Shutdown)]
+    fn handle_shutdown(&self, _msg: Shutdown, _ctx: MsgCtx, _state: WorkerState) -> ::actrs::ActorResult<WorkerState> {
+        ::actrs::ActorResult::Stop
     }
 
     fn parse_line(&self, line: &str, line_id: u64, checksum: u64, proc_time_us: u64, worker_id: usize) -> ProcessedLineResult {
@@ -474,7 +491,7 @@ impl CollectorActor {
     }
 
     #[message_consumer(FinalizeCollection)]
-    fn handle_finalize(&self, _msg: FinalizeCollection, _ctx: MsgCtx, state: CollectorState) -> CollectorState {
+    fn handle_finalize(&self, _msg: FinalizeCollection, _ctx: MsgCtx, state: CollectorState) -> ::actrs::ActorResult<CollectorState> {
         println!("\n--- Collector Summary ---");
         println!("Total Processed: {}", state.total_processed);
         println!("Valid:           {}", state.valid_count);
@@ -498,7 +515,7 @@ impl CollectorActor {
             println!("  {}: {}", status, count);
         }
         
-        state
+        ::actrs::ActorResult::Stop
     }
 }
 
@@ -575,13 +592,13 @@ impl LedgerActor {
     }
 
     #[message_consumer(FinalizeLedger)]
-    fn handle_finalize(&self, _msg: FinalizeLedger, _ctx: MsgCtx, state: LedgerState) -> LedgerState {
+    fn handle_finalize(&self, _msg: FinalizeLedger, _ctx: MsgCtx, state: LedgerState) -> ::actrs::ActorResult<LedgerState> {
         let elapsed = state.start_time.elapsed();
         let mut file = match File::create(&state.output_path) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("LedgerActor: Failed to create ledger file {}: {}", state.output_path, e);
-                return state;
+                return ::actrs::ActorResult::Ok(state);
             }
         };
 
@@ -613,7 +630,7 @@ impl LedgerActor {
         }
 
         println!("\nLedger written to: {}", state.output_path);
-        state
+        ::actrs::ActorResult::Stop
     }
 }
 
@@ -701,6 +718,12 @@ fn main() {
     let start_msg = StartReading;
     stage.send(reader, None, Box::new(ReaderActorMessage::from(start_msg)));
 
-    // Simple wait to keep the process alive.
-    std::thread::sleep(Duration::from_secs(5));
+    // Wait for all actors to finish
+    while stage.actor_count() > 0 {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    
+    stage.shutdown();
+    
+    println!("Demo complete, all actors finished and stage shutdown.");
 }

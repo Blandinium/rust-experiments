@@ -8,6 +8,33 @@ use syn::{
     PatType, Receiver, ReturnType, Type,
 };
 
+/// Attribute macro to define an actor.
+///
+/// This macro generates the necessary boilerplate for an actor, including:
+/// - A message enum (e.g., `MyActorMessage`) based on methods marked with `#[message_consumer]`.
+/// - `From` conversions for message types.
+/// - Implementation of the `Actor` and `StageAware` traits.
+///
+/// # Arguments
+/// - `state`: The type of the actor's internal state.
+/// - `handle`: (Optional) The name of the field in the actor struct that will hold the `ActorHandle`. Defaults to `_handle`.
+///
+/// # Examples
+///
+/// ```ignore
+/// #[actor(state = i32)]
+/// impl MyActor {
+///     #[initialize]
+///     fn init(&self, start: i32) -> i32 {
+///         start
+///     }
+///
+///     #[message_consumer(Add)]
+///     fn handle_add(&self, val: i32, _ctx: MsgCtx, state: i32) -> i32 {
+///         state + val
+///     }
+/// }
+/// ```
 #[proc_macro_attribute]
 pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = match parse_actor_args(attr) {
@@ -97,11 +124,25 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
         let method = &c.method_name;
         if c.msg_type.is_some() {
             quote! {
-                #enum_name::#variant(inner) => self.#method(inner, ctx, state)
+                #enum_name::#variant(inner) => {
+                    let res = self.#method(inner, ctx, state);
+                    // Use trait for conversion if we want to be fancy, but let's keep it simple
+                    // We can't easily tell if it's ActorResult at runtime without specialized traits
+                    // But we can use an internal trait that both S and ActorResult<S> implement.
+                    // Or just a simple wrapper.
+                    #[allow(unused_imports)]
+                    use ::actrs::ToActorResult;
+                    res.to_actor_result()
+                }
             }
         } else {
             quote! {
-                #enum_name::#variant => self.#method(ctx, state)
+                #enum_name::#variant => {
+                    let res = self.#method(ctx, state);
+                    #[allow(unused_imports)]
+                    use ::actrs::ToActorResult;
+                    res.to_actor_result()
+                }
             }
         }
     });
@@ -126,7 +167,8 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
                 (quote! { self.#method(param) }, param_ty)
             }
         },
-        _ => (quote! { Default::default() }, syn::parse_quote! { () }),
+        (None, _) => (quote! { Default::default() }, syn::parse_quote! { () }),
+        _ => unreachable!(),
     };
 
     let expanded = quote! {
@@ -146,14 +188,19 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
                 msg: Box<Self::M>,
                 ctx: ::actrs::MsgCtx,
                 state: Self::S,
-            ) -> Self::S {
+            ) -> ::actrs::ActorResult<Self::S> {
                 match *msg {
                     #(#match_arms),*
                 }
             }
 
-            fn handle_init(&self, param: Self::I) -> Self::S {
-                #init_impl
+            fn handle_init(&self, param: Self::I) -> ::actrs::ActorResult<Self::S> {
+                let res = match param {
+                    _ => #init_impl,
+                };
+                #[allow(unused_imports)]
+                use ::actrs::ToActorResult;
+                res.to_actor_result()
             }
         }
 
@@ -187,6 +234,10 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
     expanded.into()
 }
 
+/// Attribute macro to mark a method as the actor's initialization handler.
+///
+/// Only one method per actor can be marked with `#[initialize]`.
+/// The method should return the initial state of the actor.
 #[proc_macro_attribute]
 pub fn initialize(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
@@ -336,10 +387,28 @@ fn parse_consumer_method(method: &ImplItemFn, variant: Ident) -> syn::Result<Con
     };
 
     if !same_type(ret_ty, &state_type) {
-        return Err(syn::Error::new(
-            ret_ty.span(),
-            "return type must be the same as the state parameter type",
-        ));
+        // Check if it's ActorResult<state_type>
+        let is_actor_result = if let Type::Path(tp) = ret_ty {
+            if let Some(last_seg) = tp.path.segments.last() {
+                if last_seg.ident == "ActorResult" {
+                    // Ideally check generic argument here, but same_type check on inner might be complex
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if !is_actor_result {
+            return Err(syn::Error::new(
+                ret_ty.span(),
+                "return type must be the same as the state parameter type or ActorResult<S>",
+            ));
+        }
     }
 
     if !is_msg_ctx_type(&ctx_type) {
