@@ -10,8 +10,8 @@ use syn::{
 
 #[proc_macro_attribute]
 pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let state_type = match parse_actor_args(attr) {
-        Ok(t) => t,
+    let args = match parse_actor_args(attr) {
+        Ok(v) => v,
         Err(err) => return err.to_compile_error().into(),
     };
 
@@ -40,8 +40,8 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
                     method.span(),
                     "only one #[initialize] method is allowed",
                 )
-                    .to_compile_error()
-                    .into();
+                .to_compile_error()
+                .into();
             }
             init_method = Some(method.sig.ident.clone());
         }
@@ -61,12 +61,14 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
             impl_block.span(),
             "no #[message_consumer(...)] methods found inside #[actor] impl block",
         )
-            .to_compile_error()
-            .into();
+        .to_compile_error()
+        .into();
     }
 
     let impl_generics = &impl_block.generics;
     let (_, ty_generics, where_clause) = impl_block.generics.split_for_impl();
+    let state_type = &args.state_type;
+    let handle_field = &args.handle_field;
 
     let variants = consumers.iter().map(|c| {
         let variant = &c.variant;
@@ -115,20 +117,45 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
             #(#variants),*
         }
 
-        impl #impl_generics ::actrs::Actor<#state_type, #enum_name #ty_generics> for #self_ty #where_clause {
+        impl #impl_generics ::actrs::Actor for #self_ty #where_clause {
+            type T = #state_type;
+            type M = #enum_name #ty_generics;
+
             fn consume_message(
                 &self,
-                msg: Box<#enum_name #ty_generics>,
+                msg: Box<Self::M>,
                 ctx: ::actrs::MsgCtx,
-                state: #state_type,
-            ) -> #state_type {
+                state: Self::T,
+            ) -> Self::T {
                 match *msg {
                     #(#match_arms),*
                 }
             }
 
-            fn init(&self) -> #state_type {
+            fn init(&self) -> Self::T {
                 #init_impl
+            }
+        }
+
+        impl #impl_generics ::actrs::StageAware for #self_ty #where_clause {
+            fn set_handle(&mut self, handle: ::actrs::ActorHandle) {
+                self.#handle_field = Some(handle);
+            }
+        }
+
+        impl #impl_generics #self_ty #where_clause {
+            pub fn send<M>(
+                &self,
+                to: ::actrs::ActorRef,
+                msg: M,
+            ) -> ::core::result::Result<(), &'static str>
+            where
+                M: ::core::any::Any + Send + 'static,
+            {
+                match &self.#handle_field {
+                    Some(handle) => handle.send(to, Box::new(msg)),
+                    None => Err("actor handle not initialized"),
+                }
             }
         }
 
@@ -143,32 +170,58 @@ pub fn initialize(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
-fn parse_actor_args(attr: TokenStream) -> syn::Result<Type> {
+struct ActorArgs {
+    state_type: Type,
+    handle_field: Ident,
+}
+
+fn parse_actor_args(attr: TokenStream) -> syn::Result<ActorArgs> {
     let parser = syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated;
     let args = parser.parse(attr)?;
+
+    let mut state_type = None;
+    let mut handle_field = None;
 
     for meta in args {
         if let Meta::NameValue(MetaNameValue { path, value, .. }) = meta {
             if path.is_ident("state") {
-                if let Expr::Path(expr_path) = value {
-                    return Ok(Type::Path(syn::TypePath {
+                if let Expr::Path(ref expr_path) = value {
+                    state_type = Some(Type::Path(syn::TypePath {
                         qself: None,
-                        path: expr_path.path,
+                        path: expr_path.path.clone(),
                     }));
+                } else {
+                    return Err(syn::Error::new(
+                        value.span(),
+                        "expected a type path after state = ...",
+                    ));
                 }
-
-                return Err(syn::Error::new(
-                    value.span(),
-                    "expected a type path after state = ..., for example #[actor(state = T)]",
-                ));
+            } else if path.is_ident("handle") {
+                if let Expr::Path(ref expr_path) = value {
+                    if let Some(seg) = expr_path.path.segments.last() {
+                        handle_field = Some(seg.ident.clone());
+                    } else {
+                        return Err(syn::Error::new(
+                            value.span(),
+                            "expected a field name after handle = ...",
+                        ));
+                    }
+                } else {
+                    return Err(syn::Error::new(
+                        value.span(),
+                        "expected a field name after handle = ...",
+                    ));
+                }
             }
         }
     }
 
-    Err(syn::Error::new(
-        proc_macro2::Span::call_site(),
-        "expected #[actor(state = T)]",
-    ))
+    Ok(ActorArgs {
+        state_type: state_type.ok_or_else(|| {
+            syn::Error::new(proc_macro2::Span::call_site(), "expected #[actor(state = T)]")
+        })?,
+        handle_field: handle_field.unwrap_or_else(|| format_ident!("_handle")),
+    })
 }
 
 fn extract_type_ident(self_ty: &Type) -> syn::Result<Ident> {
