@@ -181,11 +181,15 @@ impl Stage {
 
         let mut threads = Vec::new();
         for _ in 0..num_threads {
-            let stage_clone = Arc::clone(&stage_arc);
+            let stage_weak = Arc::downgrade(&stage_arc);
             let shutdown_clone = shutdown_flag.clone();
             let handle = thread::spawn(move || loop {
                 let next = {
-                    let mut q = stage_clone.queue.lock().unwrap();
+                    let stage = match stage_weak.upgrade() {
+                        Some(s) => s,
+                        None => return,
+                    };
+                    let mut q = stage.queue.lock().unwrap();
                     loop {
                         if shutdown_clone.load(Ordering::Relaxed) {
                             return;
@@ -193,12 +197,16 @@ impl Stage {
                         if let Some(work) = q.pop_front() {
                             break Some(work);
                         }
-                        q = stage_clone.work_condvar.wait(q).unwrap();
+                        q = stage.work_condvar.wait(q).unwrap();
                     }
                 };
 
                 if let Some((actor_ref, receiver, (msg, ctx))) = next {
-                    stage_clone.run_actor(actor_ref, receiver, msg, ctx);
+                    if let Some(stage) = stage_weak.upgrade() {
+                        stage.run_actor(actor_ref, receiver, msg, ctx);
+                    } else {
+                        return;
+                    }
                 }
             });
             threads.push(handle);
@@ -227,9 +235,20 @@ impl Stage {
         for handle in threads.drain(..) {
             let _ = handle.join();
         }
+        self.actors.clear();
+        self.states.clear();
+        self.senders.clear();
+        self.unqueued.clear();
     }
+}
 
-    /// Blocks the current thread until all actors in the stage have finished.
+impl Drop for Stage {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+impl Stage {
     pub fn wait_for_completion(&self) {
         let mut q = self.queue.lock().unwrap();
         while !self.actors.is_empty() {
@@ -493,5 +512,45 @@ mod tests {
         let ref2 = stage.add_actor(MyActor::new(), 0);
 
         assert_ne!(ref1, ref2);
+    }
+
+    #[test]
+    fn test_stage_drop_shuts_down_threads() {
+        use std::sync::atomic::AtomicUsize;
+        static DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
+        DROP_COUNT.store(0, Ordering::SeqCst);
+
+        struct DropActor;
+        impl Actor for DropActor {
+            type M = ();
+            type S = ();
+            type I = ();
+            fn consume_message(&self, _msg: Box<()>, _ctx: MsgCtx, _state: ()) -> ActorResult<()> {
+                ActorResult::Ok(())
+            }
+            fn handle_init(&self, _param: ()) -> ActorResult<()> {
+                ActorResult::Ok(())
+            }
+        }
+        impl StageAware for DropActor {
+            fn set_handle(&mut self, _handle: ActorHandle) {}
+        }
+        impl Drop for DropActor {
+            fn drop(&mut self) {
+                DROP_COUNT.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        {
+            let stage = Stage::new(2, 10, Duration::from_millis(10));
+            stage.add_actor(DropActor, ());
+            // stage goes out of scope here
+        }
+
+        // Wait a bit to see if DROP_COUNT increases.
+        // It should now increase because Drop for Stage calls shutdown, which joins threads,
+        // and threads held Weak<Stage> so the reference count could reach zero.
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 1, "Actors should be dropped because Stage was dropped and shut down");
     }
 }
