@@ -140,6 +140,8 @@ impl ::core::convert::From<Stop> for CounterActorMessage {
 Basic functionality seems to be there. This would still be nice:
  * Avoid calling any of the functions directly that take a dyn Any Box. The macro should generate functions to add an actor to the stage with the correct initialization parameter and to send the various accepted messages. So all function calls can be statically typed, and the dyn Any boxes become an implementation detail.
  * Maybe add an Actor registry that allows you to contact actors by name
+ * Better error handling. Log the actor state and last message in case of a failure? Create some system event bus where actor lifecyle events are published, which could be used by a system that implements some recovery in case of actor failure.
+ * Timers that send messages.
+ * More date in the MsgCtx. A session number, that can be used to link replies to the original request. A timestamp of when the messge was sent, to be able to log delays.
  * Do some code cleanup, add comments, documentation and split up some files
  * Find a way to test better with multiple threads to make sure scheduling works correctly, and shared data is protected adequately.
- * Do something in case an actor fails. Log the message and the state. Maybe add some config to allow restarting the actor? (full supervision trees are out of scope for now)
