@@ -147,7 +147,8 @@ impl ReaderActor {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("ReaderActor: Failed to open file {}: {}", state.input_path, e);
-                return ::actrs::ActorResult::Ok(state);
+                let _ = self.send::<_, DispatcherActor>(state.dispatcher, ReaderFinished { total_lines: 0 });
+                return ::actrs::ActorResult::Stop;
             }
         };
 
@@ -598,7 +599,7 @@ impl LedgerActor {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("LedgerActor: Failed to create ledger file {}: {}", state.output_path, e);
-                return ::actrs::ActorResult::Ok(state);
+                return ::actrs::ActorResult::Stop;
             }
         };
 
