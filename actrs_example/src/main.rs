@@ -719,9 +719,7 @@ fn main() {
     stage.send(reader, None, Box::new(ReaderActorMessage::from(start_msg)));
 
     // Wait for all actors to finish
-    while stage.actor_count() > 0 {
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    stage.wait_for_completion();
     
     stage.shutdown();
     

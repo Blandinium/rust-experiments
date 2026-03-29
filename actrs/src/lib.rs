@@ -3,7 +3,7 @@ use std::any::Any;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -151,6 +151,8 @@ pub struct Stage {
     max_batch_time: Duration,
     shutdown_flag: Arc<AtomicBool>,
     worker_threads: Mutex<Vec<JoinHandle<()>>>,
+    work_condvar: Condvar,
+    empty_condvar: Condvar,
 }
 
 impl Stage {
@@ -173,6 +175,8 @@ impl Stage {
             max_batch_time,
             shutdown_flag: shutdown_flag.clone(),
             worker_threads: Mutex::new(Vec::new()),
+            work_condvar: Condvar::new(),
+            empty_condvar: Condvar::new(),
         });
 
         let mut threads = Vec::new();
@@ -180,19 +184,21 @@ impl Stage {
             let stage_clone = Arc::clone(&stage_arc);
             let shutdown_clone = shutdown_flag.clone();
             let handle = thread::spawn(move || loop {
-                if shutdown_clone.load(Ordering::Relaxed) {
-                    break;
-                }
-
                 let next = {
                     let mut q = stage_clone.queue.lock().unwrap();
-                    q.pop_front()
+                    loop {
+                        if shutdown_clone.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        if let Some(work) = q.pop_front() {
+                            break Some(work);
+                        }
+                        q = stage_clone.work_condvar.wait(q).unwrap();
+                    }
                 };
 
                 if let Some((actor_ref, receiver, (msg, ctx))) = next {
                     stage_clone.run_actor(actor_ref, receiver, msg, ctx);
-                } else {
-                    thread::sleep(Duration::from_millis(10));
                 }
             });
             threads.push(handle);
@@ -216,9 +222,18 @@ impl Stage {
     /// This should be called once the stage is no longer needed.
     pub fn shutdown(&self) {
         self.shutdown_flag.store(true, Ordering::Relaxed);
+        self.work_condvar.notify_all();
         let mut threads = self.worker_threads.lock().unwrap();
         for handle in threads.drain(..) {
             let _ = handle.join();
+        }
+    }
+
+    /// Blocks the current thread until all actors in the stage have finished.
+    pub fn wait_for_completion(&self) {
+        let mut q = self.queue.lock().unwrap();
+        while !self.actors.is_empty() {
+            q = self.empty_condvar.wait(q).unwrap();
         }
     }
 
@@ -265,6 +280,9 @@ impl Stage {
                     ActorResult::Stop | ActorResult::Error(_) => {
                         self.actors.remove(&actor_ref);
                         self.senders.remove(&actor_ref);
+                        if self.actors.is_empty() {
+                            self.empty_condvar.notify_all();
+                        }
                         return;
                     }
                 }
@@ -286,6 +304,7 @@ impl Stage {
     fn queue_actor_if_pending(&self, actor_ref: ActorRef, receiver: Receiver<ActorMessage>) {
         if let Ok(msg_data) = receiver.try_recv() {
             self.queue.lock().unwrap().push_back((actor_ref, receiver, msg_data));
+            self.work_condvar.notify_one();
         } else {
             self.return_to_unqueued(actor_ref, receiver);
         }
@@ -435,7 +454,8 @@ mod tests {
                 break;
             }
 
-            thread::sleep(Duration::from_millis(5));
+            let q = stage.queue.lock().unwrap();
+            let _ = stage.empty_condvar.wait_timeout(q, Duration::from_millis(5)).unwrap();
         }
 
         let state = stage.states.get(&actor_ref).unwrap();
