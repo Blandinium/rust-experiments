@@ -122,7 +122,7 @@ where
 }
 
 type ActorMessage = (Box<dyn Any + Send>, MsgCtx);
-type ActorQueue = Arc<Mutex<VecDeque<(ActorRef, Receiver<ActorMessage>, ActorMessage)>>>;
+type ActorQueue = Arc<Mutex<VecDeque<(ActorRef, Receiver<ActorMessage>)>>>;
 
 /// A `Stage` manages a set of actors and schedules their message processing
 /// across a fixed pool of worker threads.
@@ -201,9 +201,9 @@ impl Stage {
                     }
                 };
 
-                if let Some((actor_ref, receiver, (msg, ctx))) = next {
+                if let Some((actor_ref, receiver)) = next {
                     if let Some(stage) = stage_weak.upgrade() {
-                        stage.run_actor(actor_ref, receiver, msg, ctx);
+                        stage.run_actor(actor_ref, receiver);
                     } else {
                         return;
                     }
@@ -260,8 +260,6 @@ impl Stage {
         &self,
         actor_ref: ActorRef,
         receiver: Receiver<ActorMessage>,
-        msg: Box<dyn Any + Send>,
-        ctx: MsgCtx,
     ) {
         let actor = self.actors.get(&actor_ref).map(|a| a.value().clone());
 
@@ -275,11 +273,14 @@ impl Stage {
             let deadline = Instant::now() + self.max_batch_time;
             let mut processed = 0usize;
             let mut current_state = state;
-            let mut current_msg = Some(msg);
-            let mut current_ctx = ctx;
+            let Some((mut current_msg, mut current_ctx)) = receiver.try_recv().ok() else {
+                self.states.insert(actor_ref, current_state);
+                self.return_to_unqueued(actor_ref, receiver);
+                return;
+            };
 
-            while let Some(msg) = current_msg.take() {
-                match actor.consume_any_message(msg, current_ctx, current_state) {
+            loop {
+                match actor.consume_any_message(current_msg, current_ctx, current_state) {
                     ActorResult::Ok(new_state) => {
                         current_state = new_state;
                         processed += 1;
@@ -290,7 +291,7 @@ impl Stage {
 
                         match receiver.try_recv() {
                             Ok((next_msg, next_ctx)) => {
-                                current_msg = Some(next_msg);
+                                current_msg = next_msg;
                                 current_ctx = next_ctx;
                             }
                             Err(_) => break,
@@ -313,20 +314,16 @@ impl Stage {
             let hit_time_limit = Instant::now() >= deadline;
 
             if hit_message_limit || hit_time_limit {
-                self.queue_actor_if_pending(actor_ref, receiver);
+                self.queue_actor(actor_ref, receiver);
             } else {
                 self.return_to_unqueued(actor_ref, receiver);
             }
         }
     }
 
-    fn queue_actor_if_pending(&self, actor_ref: ActorRef, receiver: Receiver<ActorMessage>) {
-        if let Ok(msg_data) = receiver.try_recv() {
-            self.queue.lock().unwrap().push_back((actor_ref, receiver, msg_data));
-            self.work_condvar.notify_one();
-        } else {
-            self.return_to_unqueued(actor_ref, receiver);
-        }
+    fn queue_actor(&self, actor_ref: ActorRef, receiver: Receiver<ActorMessage>) {
+        self.queue.lock().unwrap().push_back((actor_ref, receiver));
+        self.work_condvar.notify_one();
     }
 
     fn return_to_unqueued(&self, actor_ref: ActorRef, receiver: Receiver<ActorMessage>) {
@@ -344,7 +341,7 @@ impl Stage {
 
             if let Some((_, receiver_mutex)) = self.unqueued.remove(&to) {
                 let receiver = receiver_mutex.into_inner().unwrap();
-                self.queue_actor_if_pending(to, receiver);
+                self.queue_actor(to, receiver);
             }
         }
     }
