@@ -1,10 +1,9 @@
-
-use actrs_macros::actor;
 use actrs::{ActorRef, MsgCtx, Stage};
+use actrs_macros::actor;
 use proplists::List;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 // --- Configuration ---
 const WORKER_COUNT: usize = 4;
@@ -673,7 +672,7 @@ fn main() {
         generate_sample_log(&input_path, 1000);
     }
 
-    let stage = Stage::new(8, 10, Duration::from_millis(5));
+    let stage = Stage::new(8);
 
     let collector = stage.add_actor(CollectorActor { _handle: None }, ());
     let ledger = stage.add_actor(LedgerActor { _handle: None }, LedgerState {
