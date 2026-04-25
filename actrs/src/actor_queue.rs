@@ -180,12 +180,17 @@ impl ActorQueue {
                 return;
             }
         };
-        if *counter > 0 {
+        let should_notify = if *counter > 0 {
             self.queue.lock().unwrap().push_back(actor_ref);
+            true
         } else {
             self.idle.insert(actor_ref, ());
+            false
+        };
+        drop(counter); // Only at the end, we free the lock
+        if should_notify {
+            self.work_condvar.notify_one();
         }
-        drop(counter) // Only at the end, we free the lock
     }
     
     pub fn remove_actor(&self, actor_ref : &ActorRef) {
